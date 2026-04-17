@@ -33,14 +33,14 @@ function load_env(string $path): void
     }
 }
 
-function env(string $key, ?string $default = null): ?string
+function env(string $key, mixed $default = null): mixed
 {
     $value = $_ENV[$key] ?? getenv($key);
     if ($value === false || $value === null || $value === '') {
         return $default;
     }
 
-    return (string) $value;
+    return $value;
 }
 
 load_env(APP_BASE_PATH . '/.env');
