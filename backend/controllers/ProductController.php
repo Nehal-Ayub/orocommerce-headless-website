@@ -27,7 +27,7 @@ final class ProductController
     {
         try {
             $companyId = (int) ($request['user']['company_id'] ?? 0);
-            $products = $this->productService->listProducts($request['query'] ?? [], $companyId);
+            $products = $this->productService->getProducts($request['query'] ?? [], $companyId);
 
             return [
                 'status' => 200,
