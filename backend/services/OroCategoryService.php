@@ -19,7 +19,7 @@ final class OroCategoryService
             $cacheKey,
             (int) env('CACHE_TTL_CATEGORIES', '600'),
             function () use ($query): array {
-                $response = $this->apiClient->get('/api/mastercatalogcategories', $query, true);
+                $response = $this->apiClient->get('/mastercatalogcategories', $query, true);
                 $categories = [];
 
                 foreach ($response['data'] ?? [] as $category) {

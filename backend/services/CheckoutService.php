@@ -78,7 +78,7 @@ final class CheckoutService
             ],
         ];
 
-        $checkoutResponse = $this->oroApiClient->post('/api/checkouts', $checkoutPayload, true);
+        $checkoutResponse = $this->oroApiClient->post('/checkouts', $checkoutPayload, true);
         $orderId = $checkoutResponse['data']['id'] ?? null;
 
         return [

@@ -62,7 +62,7 @@ final class OroApiClient
             throw new ApiException('Missing ORO API base URL configuration.', 500);
         }
 
-        $url = $baseUrl . '/' . ltrim($path, '/');
+        $url = $baseUrl . $this->normalizePath($baseUrl, $path);
         if ($query !== []) {
             $url .= '?' . http_build_query($query);
         }
@@ -105,6 +105,25 @@ final class OroApiClient
         }
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    private function normalizePath(string $baseUrl, string $path): string
+    {
+        $normalizedPath = '/' . ltrim($path, '/');
+
+        // Avoid .../api/api/... when ORO_*_BASE_URL already contains /api.
+        if (str_ends_with($baseUrl, '/api') && str_starts_with($normalizedPath, '/api/')) {
+            $normalizedPath = substr($normalizedPath, 4);
+            if ($normalizedPath === false || $normalizedPath === '') {
+                $normalizedPath = '/';
+            }
+        }
+
+        if (str_ends_with($baseUrl, '/api') && $normalizedPath === '/api') {
+            return '/';
+        }
+
+        return $normalizedPath;
     }
 }
 

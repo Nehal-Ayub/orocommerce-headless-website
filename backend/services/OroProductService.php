@@ -31,7 +31,7 @@ final class OroProductService
             $query['filter[category]'] = (string) $filters['categoryId'];
         }
 
-        $oroResponse = $this->apiClient->get('/api/products', $query, true, (int) env('CACHE_TTL_PRODUCTS', '300'));
+        $oroResponse = $this->apiClient->get('/products', $query, true, (int) env('CACHE_TTL_PRODUCTS', '300'));
         $items = $oroResponse['data'] ?? [];
 
         $mappedProducts = array_map([$this, 'mapProductResource'], $items);
@@ -84,7 +84,7 @@ final class OroProductService
 
     public function getProductById(int $productId, int $companyId): array
     {
-        $oroResponse = $this->apiClient->get('/api/products/' . $productId, ['include' => 'category'], false);
+        $oroResponse = $this->apiClient->get('/products/' . $productId, ['include' => 'category'], false);
         $data = $oroResponse['data'] ?? null;
         if (!is_array($data)) {
             throw new ApiException('Product not found.', 404);

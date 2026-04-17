@@ -31,7 +31,7 @@ final class OroCompanyPricingService
                     'page[size]' => '100',
                 ];
 
-                $response = $this->apiClient->get('/api/customerusers', $query, true);
+                $response = $this->apiClient->get('/customerusers', $query, true);
                 $included = $response['included'] ?? [];
                 $priceLists = [];
 
@@ -81,7 +81,7 @@ final class OroCompanyPricingService
             'page[size]' => (string) max(100, count($productIds)),
         ];
 
-        $response = $this->apiClient->get('/api/pricelistproducts', $query, true);
+        $response = $this->apiClient->get('/pricelistproducts', $query, true);
         $prices = [];
 
         foreach ($response['data'] ?? [] as $item) {
