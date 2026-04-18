@@ -26,7 +26,7 @@ final class OroCompanyPricingService
             (int) ($_ENV['CACHE_TTL_PRICE_LISTS'] ?? 300),
             function () use ($companyId): array {
                 $query = [
-                    'filter[company.id]' => (string) $companyId,
+                    'filter[customer]' => (string) $companyId,
                     'include' => 'priceLists',
                     'page[size]' => '100',
                 ];
