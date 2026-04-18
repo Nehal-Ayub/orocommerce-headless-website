@@ -23,13 +23,13 @@ final class CategoryController
     public function index(array $request): array
     {
         $query = $request['query'] ?? [];
-        $categories = $this->categoryService->listCategories($query);
+        $categories = $this->categoryService->getCategories($query);
 
         return [
             'status' => 200,
             'data' => [
-                'data' => $categories,
-                'meta' => ['count' => count($categories)],
+                'data' => $categories['items'] ?? [],
+                'meta' => $categories['meta'] ?? ['count' => 0],
             ],
         ];
     }

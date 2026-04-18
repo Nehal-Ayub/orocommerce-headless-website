@@ -23,10 +23,19 @@ class OroAuthService
         if ($tokenEndpoint === '') {
             throw new ApiException('Missing ORO_OAUTH_TOKEN_URL configuration.', 500);
         }
+        $clientId = (string) (env('ORO_CLIENT_ID', '') ?: env('ORO_API_CLIENT_ID', ''));
+        $clientSecret = (string) (env('ORO_CLIENT_SECRET', '') ?: env('ORO_API_CLIENT_SECRET', ''));
+        if ($clientId === '' || $clientSecret === '') {
+            throw new ApiException(
+                'Missing Oro OAuth client credentials. Set ORO_CLIENT_ID/ORO_CLIENT_SECRET (or ORO_API_CLIENT_ID/ORO_API_CLIENT_SECRET).',
+                500
+            );
+        }
+
         $payload = http_build_query([
             'grant_type' => 'client_credentials',
-            'client_id' => env('ORO_CLIENT_ID', ''),
-            'client_secret' => env('ORO_CLIENT_SECRET', ''),
+            'client_id' => $clientId,
+            'client_secret' => $clientSecret,
         ]);
 
         $ch = curl_init();
@@ -45,8 +54,19 @@ class OroAuthService
         curl_close($ch);
 
         if ($response === false || $statusCode >= 400) {
+            $rawBody = is_string($response) ? $response : '';
+            $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
+            $errorMessage = 'Unable to authenticate with OroCommerce API.';
+            if (is_array($decoded)) {
+                $errorMessage = (string) ($decoded['error_description'] ?? $decoded['error'] ?? $errorMessage);
+            }
+
             throw new ApiException(
-                'Unable to authenticate with OroCommerce API.',
+                sprintf(
+                    '%s (status %d). Verify ORO_OAUTH_TOKEN_URL and OAuth client credentials.',
+                    $errorMessage,
+                    $statusCode
+                ),
                 502,
                 ['statusCode' => $statusCode, 'error' => $curlError]
             );

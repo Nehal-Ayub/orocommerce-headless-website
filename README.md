@@ -216,6 +216,8 @@ JWT_TTL=3600
 ORO_OAUTH_TOKEN_URL=https://your-orocommerce-instance.com/oauth2-token
 ORO_CLIENT_ID=your_oro_oauth_client_id
 ORO_CLIENT_SECRET=your_oro_oauth_client_secret
+ORO_API_CLIENT_ID=your_oro_oauth_client_id
+ORO_API_CLIENT_SECRET=your_oro_oauth_client_secret
 # backward-compatible aliases
 ORO_API_CLIENT_ID=your_oro_oauth_client_id
 ORO_API_CLIENT_SECRET=your_oro_oauth_client_secret
