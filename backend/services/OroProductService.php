@@ -33,8 +33,12 @@ final class OroProductService
 
         $oroResponse = $this->apiClient->get('/products', $query, true, (int) env('CACHE_TTL_PRODUCTS', '300'));
         $items = $oroResponse['data'] ?? [];
+        $resolvedNames = $this->resolveNamesForResources($items);
 
-        $mappedProducts = array_map([$this, 'mapProductResource'], $items);
+        $mappedProducts = array_map(
+            fn(array $item): array => $this->mapProductResource($item, $resolvedNames),
+            $items
+        );
         $productIds = array_values(array_map(static fn(array $item): int => (int) $item['id'], $mappedProducts));
         $priceMap = $this->pricingService->getProductPricesForCompany($companyId, $productIds);
         $priceLists = $this->pricingService->getCompanyPriceLists($companyId);
@@ -90,7 +94,8 @@ final class OroProductService
             throw new ApiException('Product not found.', 404);
         }
 
-        $product = $this->mapProductResource($data);
+        $resolvedNames = $this->resolveNamesForResources([$data]);
+        $product = $this->mapProductResource($data, $resolvedNames);
         $prices = $this->pricingService->getProductPricesForCompany($companyId, [$productId]);
         $price = $prices[$productId] ?? null;
 
@@ -113,11 +118,15 @@ final class OroProductService
         ];
     }
 
-    private function mapProductResource(array $resource): array
+    /**
+     * @param array<int, string> $resolvedNames
+     */
+    private function mapProductResource(array $resource, array $resolvedNames = []): array
     {
         $attributes = $resource['attributes'] ?? [];
         $description = $attributes['descriptions']['default'] ?? ($attributes['description'] ?? '');
-        $name = $attributes['names']['default'] ?? ($attributes['name'] ?? 'Unnamed Product');
+        $resourceId = (int) ($resource['id'] ?? 0);
+        $name = $resolvedNames[$resourceId] ?? $this->extractInlineName($attributes) ?? 'Unnamed Product';
         $sku = $attributes['sku'] ?? '';
         $rawPrice = $attributes['price'] ?? ($attributes['prices']['default'] ?? 0);
         $categoryId = $resource['relationships']['category']['data']['id'] ?? null;
@@ -137,7 +146,7 @@ final class OroProductService
         }
 
         return [
-            'id' => (int) ($resource['id'] ?? 0),
+            'id' => $resourceId,
             'sku' => (string) $sku,
             'name' => (string) $name,
             'description' => (string) $description,
@@ -149,5 +158,116 @@ final class OroProductService
             'priceListId' => null,
             'priceListName' => null,
         ];
+    }
+
+    /**
+     * Resolve product names using the subresource endpoint when inline names
+     * are not available in the product payload.
+     *
+     * @param array<int, array<string, mixed>> $resources
+     * @return array<int, string>
+     */
+    private function resolveNamesForResources(array $resources): array
+    {
+        $names = [];
+        $missingIds = [];
+
+        foreach ($resources as $resource) {
+            $id = (int) ($resource['id'] ?? 0);
+            if ($id <= 0) {
+                continue;
+            }
+
+            $attributes = $resource['attributes'] ?? [];
+            $inlineName = $this->extractInlineName(is_array($attributes) ? $attributes : []);
+            if ($inlineName !== null) {
+                $names[$id] = $inlineName;
+                continue;
+            }
+
+            $missingIds[] = $id;
+        }
+
+        foreach ($missingIds as $id) {
+            $subresourceName = $this->fetchNameFromSubresource($id);
+            if ($subresourceName !== null) {
+                $names[$id] = $subresourceName;
+            }
+        }
+
+        return $names;
+    }
+
+    /**
+     * @param array<string, mixed> $attributes
+     */
+    private function extractInlineName(array $attributes): ?string
+    {
+        $names = $attributes['names'] ?? null;
+        if (is_array($names)) {
+            if (!empty($names['default']) && is_string($names['default'])) {
+                return $names['default'];
+            }
+
+            foreach ($names as $value) {
+                if (is_string($value) && trim($value) !== '') {
+                    return $value;
+                }
+            }
+        }
+
+        $name = $attributes['name'] ?? null;
+        if (is_string($name) && trim($name) !== '') {
+            return $name;
+        }
+
+        return null;
+    }
+
+    private function fetchNameFromSubresource(int $productId): ?string
+    {
+        if ($productId <= 0) {
+            return null;
+        }
+
+        try {
+            $response = $this->apiClient->get('/products/' . $productId . '/names', [], true, (int) env('CACHE_TTL_PRODUCTS', '300'));
+        } catch (ApiException) {
+            return null;
+        }
+
+        return $this->extractNameFromSubresourcePayload($response);
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function extractNameFromSubresourcePayload(array $payload): ?string
+    {
+        $data = $payload['data'] ?? null;
+        if ($data === null) {
+            return null;
+        }
+
+        $candidates = is_array($data) && array_is_list($data) ? $data : [$data];
+        foreach ($candidates as $candidate) {
+            if (!is_array($candidate)) {
+                continue;
+            }
+
+            $attributes = $candidate['attributes'] ?? null;
+            if (!is_array($attributes)) {
+                continue;
+            }
+
+            foreach (['string', 'value', 'text', 'fallback'] as $field) {
+                $fieldValue = $attributes[$field] ?? null;
+                if (is_string($fieldValue) && trim($fieldValue) !== '') {
+                    return $fieldValue;
+                }
+            }
+        }
+
+        return null;
     }
 }
