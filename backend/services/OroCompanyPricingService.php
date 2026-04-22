@@ -164,6 +164,16 @@ final class OroCompanyPricingService
             }
         }
 
+        if (count($prices) < count($productIds)) {
+            $minimalPrices = $this->fetchMinimalPricesFromProducts($productIds);
+            foreach ($minimalPrices as $productId => $price) {
+                if (isset($prices[$productId])) {
+                    continue;
+                }
+                $prices[$productId] = $price;
+            }
+        }
+
         return $prices;
     }
 
@@ -312,6 +322,7 @@ final class OroCompanyPricingService
         $productIdList = implode(',', array_map('strval', $productIds));
         $pageSize = (string) max(100, count($productIds));
         $customerScopes = $companyId > 0 ? [$companyId, 0] : [0];
+        $websiteId = trim((string) ($_ENV['ORO_WEBSITE_ID'] ?? ''));
         $result = [];
 
         foreach ($customerScopes as $customerId) {
@@ -330,6 +341,16 @@ final class OroCompanyPricingService
                     'path' => '/customerprices',
                     'query' => [
                         'filter[customer.id]' => (string) $customerId,
+                        'filter[product]' => $productIdList,
+                        'include' => 'product',
+                        'page[size]' => $pageSize,
+                    ],
+                    'label' => $customerId > 0 ? 'Customer Scoped Price' : 'Guest Price',
+                ],
+                [
+                    'path' => '/customerprices',
+                    'query' => [
+                        'filter[customer.id]' => (string) $customerId,
                         'filter[product.id]' => $productIdList,
                         'include' => 'product',
                         'page[size]' => $pageSize,
@@ -349,6 +370,15 @@ final class OroCompanyPricingService
                 [
                     'path' => '/productprices',
                     'query' => [
+                        'filter[product]' => $productIdList,
+                        'include' => 'product',
+                        'page[size]' => $pageSize,
+                    ],
+                    'label' => 'Default Product Price',
+                ],
+                [
+                    'path' => '/productprices',
+                    'query' => [
                         'filter[customer.id]' => (string) $customerId,
                         'filter[product.id]' => $productIdList,
                         'include' => 'product',
@@ -357,6 +387,20 @@ final class OroCompanyPricingService
                     'label' => $customerId > 0 ? 'Customer Scoped Price' : 'Guest Price',
                 ],
             ];
+
+            if ($websiteId !== '') {
+                $websiteAttempts = [];
+                foreach ($attempts as $attempt) {
+                    $withWebsite = $attempt;
+                    $withWebsite['query']['filter[website]'] = $websiteId;
+                    $websiteAttempts[] = $withWebsite;
+
+                    $withWebsiteId = $attempt;
+                    $withWebsiteId['query']['filter[website.id]'] = $websiteId;
+                    $websiteAttempts[] = $withWebsiteId;
+                }
+                $attempts = array_merge($websiteAttempts, $attempts);
+            }
 
             foreach ($attempts as $attempt) {
                 try {
@@ -384,6 +428,92 @@ final class OroCompanyPricingService
         }
 
         return $result;
+    }
+
+    /**
+     * Final fallback for guest/default pricing: resolve minimal/default prices from
+     * product payload itself when dedicated pricing resources are unavailable.
+     *
+     * @param array<int, int> $productIds
+     * @return array<int, array{amount: float, currency: string, priceListId: int|null, priceListName: string}>
+     */
+    private function fetchMinimalPricesFromProducts(array $productIds): array
+    {
+        if ($productIds === []) {
+            return [];
+        }
+
+        $productIdCsv = implode(',', array_map('strval', $productIds));
+        $pageSize = (string) max(100, count($productIds));
+        $attempts = [
+            [
+                'filter[id]' => $productIdCsv,
+                'page[size]' => $pageSize,
+            ],
+            [
+                'filter[id]' => $productIdCsv,
+                'page[size]' => $pageSize,
+                'include' => 'minimalPrice',
+            ],
+            [
+                'filter[id]' => $productIdCsv,
+                'filter[status]' => 'enabled',
+                'page[size]' => $pageSize,
+            ],
+            [
+                'filter[id]' => $productIdCsv,
+                'filter[status]' => 'enabled',
+                'include' => 'minimalPrice',
+                'page[size]' => $pageSize,
+            ],
+            [
+                'filter[status]' => 'enabled',
+                'page[size]' => $pageSize,
+            ],
+            [
+                'filter[status]' => 'enabled',
+                'include' => 'minimalPrice',
+                'page[size]' => $pageSize,
+            ],
+        ];
+
+        foreach ($attempts as $query) {
+            try {
+                $response = $this->apiClient->get('/products', $query, true);
+            } catch (\App\Models\ApiException) {
+                continue;
+            }
+
+            $prices = [];
+            foreach ($response['data'] ?? [] as $resource) {
+                if (!is_array($resource)) {
+                    continue;
+                }
+                $id = (int) ($resource['id'] ?? 0);
+                if ($id <= 0 || !in_array($id, $productIds, true)) {
+                    continue;
+                }
+
+                $attributes = is_array($resource['attributes'] ?? null) ? $resource['attributes'] : [];
+                $price = $this->extractPriceValue($attributes, 'USD');
+                if ($price === null) {
+                    continue;
+                }
+
+                $prices[$id] = [
+                    'amount' => $price['amount'],
+                    'currency' => $price['currency'],
+                    'priceListId' => null,
+                    'priceListName' => 'Default Product Price',
+                ];
+            }
+
+            if ($prices !== []) {
+                return $prices;
+            }
+        }
+
+        return [];
     }
 
     /**
@@ -468,6 +598,8 @@ final class OroCompanyPricingService
             $attributes['price_list'] ?? null,
             $attributes['customerPrice'] ?? null,
             $attributes['customer_price'] ?? null,
+            $attributes['minimalPrice'] ?? null,
+            $attributes['minimal_price'] ?? null,
         ];
         foreach ($priceLists as $pricePayload) {
             if (!is_array($pricePayload)) {
@@ -516,31 +648,34 @@ final class OroCompanyPricingService
      */
     private function extractPriceFromRelationships(array $resource, array $includedIndex, string $defaultCurrency): ?array
     {
-        $priceRelation = $resource['relationships']['prices']['data'] ?? null;
-        if (!is_array($priceRelation)) {
-            return null;
-        }
-
-        $identifiers = array_is_list($priceRelation) ? $priceRelation : [$priceRelation];
-        foreach ($identifiers as $identifier) {
-            if (!is_array($identifier)) {
-                continue;
-            }
-            $type = (string) ($identifier['type'] ?? '');
-            $id = (string) ($identifier['id'] ?? '');
-            if ($type === '' || $id === '') {
+        $relationshipCandidates = ['prices', 'price', 'minimalPrice', 'customerPrice'];
+        foreach ($relationshipCandidates as $relationshipName) {
+            $priceRelation = $resource['relationships'][$relationshipName]['data'] ?? null;
+            if (!is_array($priceRelation)) {
                 continue;
             }
 
-            $included = $includedIndex[$this->includedKey($type, $id)] ?? null;
-            if (!is_array($included)) {
-                continue;
-            }
+            $identifiers = array_is_list($priceRelation) ? $priceRelation : [$priceRelation];
+            foreach ($identifiers as $identifier) {
+                if (!is_array($identifier)) {
+                    continue;
+                }
+                $type = (string) ($identifier['type'] ?? '');
+                $id = (string) ($identifier['id'] ?? '');
+                if ($type === '' || $id === '') {
+                    continue;
+                }
 
-            $attributes = is_array($included['attributes'] ?? null) ? $included['attributes'] : [];
-            $price = $this->extractPriceValue($attributes, $defaultCurrency);
-            if ($price !== null) {
-                return $price;
+                $included = $includedIndex[$this->includedKey($type, $id)] ?? null;
+                if (!is_array($included)) {
+                    continue;
+                }
+
+                $attributes = is_array($included['attributes'] ?? null) ? $included['attributes'] : [];
+                $price = $this->extractPriceValue($attributes, $defaultCurrency);
+                if ($price !== null) {
+                    return $price;
+                }
             }
         }
 

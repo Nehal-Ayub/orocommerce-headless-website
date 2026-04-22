@@ -519,7 +519,16 @@ final class OroProductService
                 (int) env('CACHE_TTL_PRODUCTS', '300')
             );
         } catch (ApiException) {
-            return [];
+            try {
+                $response = $this->apiClient->get(
+                    '/products/' . $productId . '/images',
+                    [],
+                    true,
+                    (int) env('CACHE_TTL_PRODUCTS', '300')
+                );
+            } catch (ApiException) {
+                return [];
+            }
         }
 
         $includedIndex = $this->buildIncludedIndex($response['included'] ?? []);
@@ -529,6 +538,9 @@ final class OroProductService
                 continue;
             }
             $url = $this->extractImageUrlFromProductImageResource($imageResource, $includedIndex);
+            if ($url === null) {
+                $url = $this->extractImageUrlFromProductImageSubresource($imageResource);
+            }
             if ($url !== null) {
                 $images[] = $url;
             }
@@ -718,7 +730,9 @@ final class OroProductService
      */
     private function resolveImagesFromRelationship(array $resource, array $includedIndex): array
     {
-        $relationshipData = $resource['relationships']['images']['data'] ?? null;
+        $relationshipData = $resource['relationships']['images']['data']
+            ?? $resource['relationships']['image']['data']
+            ?? null;
         if (!is_array($relationshipData)) {
             return [];
         }
@@ -862,7 +876,8 @@ final class OroProductService
                         continue;
                     }
                     $dimension = strtolower((string) ($item['dimension'] ?? ''));
-                    if ($dimension !== strtolower($dimensionKey)) {
+                    $requestedDimension = strtolower($dimensionKey);
+                    if ($dimension !== $requestedDimension && !str_contains($dimension, $requestedDimension)) {
                         continue;
                     }
 
@@ -928,10 +943,43 @@ final class OroProductService
     private function extractFileUrl(array $fileResource): ?string
     {
         $attributes = is_array($fileResource['attributes'] ?? null) ? $fileResource['attributes'] : [];
-        foreach (['product_listing', 'listing', 'product_gallery_main', 'main', 'original'] as $dimensionKey) {
+        foreach (['product_listing', 'listing', 'product_gallery_main', 'main', 'original', 'product_original'] as $dimensionKey) {
             $dimensionUrl = $this->extractImageUrlByDimension($attributes, $dimensionKey);
             if ($dimensionUrl !== null) {
                 return $this->absolutizeUrl($dimensionUrl);
+            }
+        }
+
+        // Fallback when filePath/urls contains list of URLs without requested dimension.
+        foreach (['filePath', 'path', 'paths', 'urls'] as $field) {
+            $value = $attributes[$field] ?? null;
+            if (!is_array($value)) {
+                continue;
+            }
+
+            if (array_is_list($value)) {
+                foreach ($value as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+                    $url = $item['url'] ?? null;
+                    if (is_string($url) && trim($url) !== '') {
+                        return $this->absolutizeUrl($url);
+                    }
+                }
+                continue;
+            }
+
+            foreach ($value as $candidate) {
+                if (is_string($candidate) && trim($candidate) !== '') {
+                    return $this->absolutizeUrl($candidate);
+                }
+                if (is_array($candidate)) {
+                    $url = $candidate['url'] ?? null;
+                    if (is_string($url) && trim($url) !== '') {
+                        return $this->absolutizeUrl($url);
+                    }
+                }
             }
         }
 
@@ -978,6 +1026,37 @@ final class OroProductService
 
         $data = $response['data'] ?? null;
         return is_array($data) ? $data : null;
+    }
+
+    /**
+     * If product images are returned without included file relation, load the image
+     * record by id and resolve its file relation on demand.
+     */
+    private function extractImageUrlFromProductImageSubresource(array $imageResource): ?string
+    {
+        $imageId = (string) ($imageResource['id'] ?? '');
+        if ($imageId === '') {
+            return null;
+        }
+
+        try {
+            $response = $this->apiClient->get(
+                '/productimages/' . $imageId,
+                ['include' => 'image,types'],
+                true,
+                (int) env('CACHE_TTL_PRODUCTS', '300')
+            );
+        } catch (ApiException) {
+            return null;
+        }
+
+        $data = $response['data'] ?? null;
+        if (!is_array($data)) {
+            return null;
+        }
+
+        $includedIndex = $this->buildIncludedIndex($response['included'] ?? []);
+        return $this->extractImageUrlFromProductImageResource($data, $includedIndex);
     }
 
     private function absolutizeUrl(string $url): string
