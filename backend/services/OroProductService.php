@@ -223,7 +223,7 @@ final class OroProductService
      */
     private function extractInlinePrice(array $attributes): array
     {
-        $amountFields = ['price', 'value', 'amount', 'defaultPrice'];
+        $amountFields = ['price', 'value', 'amount', 'defaultPrice', 'minimalPrice', 'minimal_price'];
         foreach ($amountFields as $field) {
             $value = $attributes[$field] ?? null;
             if (is_numeric($value)) {
@@ -234,7 +234,7 @@ final class OroProductService
             }
         }
 
-        $prices = $attributes['prices'] ?? null;
+        $prices = $attributes['prices'] ?? ($attributes['minimalPrice'] ?? null);
         if (is_array($prices)) {
             $priceCandidates = array_is_list($prices) ? $prices : [$prices];
             foreach ($priceCandidates as $candidate) {
@@ -328,10 +328,20 @@ final class OroProductService
             }
             $type = (string) ($resource['type'] ?? '');
             $id = (string) ($resource['id'] ?? '');
-            if ($type === '' || $id === '') {
+            if ($type === '') {
                 continue;
             }
-            $index[$this->includedKey($type, $id)] = $resource;
+            if ($id !== '') {
+                $index[$this->includedKey($type, $id)] = $resource;
+            }
+
+            // Some Oro endpoints may omit ids in included resources.
+            // Keep an additional bucket by resource type to allow fallback resolution.
+            $typeKey = $this->includedTypeKey($type);
+            $index[$typeKey] ??= [];
+            if (is_array($index[$typeKey])) {
+                $index[$typeKey][] = $resource;
+            }
         }
 
         return $index;
@@ -340,6 +350,11 @@ final class OroProductService
     private function includedKey(string $type, string $id): string
     {
         return strtolower($type . ':' . $id);
+    }
+
+    private function includedTypeKey(string $type): string
+    {
+        return '__type__:' . strtolower($type);
     }
 
     /**
@@ -554,23 +569,38 @@ final class OroProductService
             }
 
             $included = $includedIndex[$this->includedKey($type, $id)] ?? null;
-            if (!is_array($included)) {
+            $includedCandidates = [];
+            if (is_array($included)) {
+                $includedCandidates[] = $included;
+            } elseif ($id === '') {
+                $typeCandidates = $includedIndex[$this->includedTypeKey($type)] ?? null;
+                if (is_array($typeCandidates)) {
+                    foreach ($typeCandidates as $candidate) {
+                        if (is_array($candidate)) {
+                            $includedCandidates[] = $candidate;
+                        }
+                    }
+                }
+            }
+            if ($includedCandidates === []) {
                 continue;
             }
 
-            $attributes = is_array($included['attributes'] ?? null) ? $included['attributes'] : [];
-            $value = $this->extractLocalizedValue($attributes, $preferText);
-            if ($value === null) {
-                continue;
-            }
+            foreach ($includedCandidates as $includedCandidate) {
+                $attributes = is_array($includedCandidate['attributes'] ?? null) ? $includedCandidate['attributes'] : [];
+                $value = $this->extractLocalizedValue($attributes, $preferText);
+                if ($value === null) {
+                    continue;
+                }
 
-            $localization = $included['relationships']['localization']['data'] ?? null;
-            if ($localization === null) {
-                $defaultValue = $value;
-                break;
-            }
-            if ($localizedValue === null) {
-                $localizedValue = $value;
+                $localization = $includedCandidate['relationships']['localization']['data'] ?? null;
+                if ($localization === null) {
+                    $defaultValue = $value;
+                    break 2;
+                }
+                if ($localizedValue === null) {
+                    $localizedValue = $value;
+                }
             }
         }
 
@@ -737,10 +767,61 @@ final class OroProductService
     private function extractImageUrlFromProductImageResource(array $productImageResource, array $includedIndex): ?string
     {
         $attributes = is_array($productImageResource['attributes'] ?? null) ? $productImageResource['attributes'] : [];
+        $imageType = $this->extractProductImageType($productImageResource, $includedIndex);
+
+        // Prefer storefront-friendly image renditions first.
+        foreach (['product_listing', 'listing', 'product_gallery_main', 'main'] as $dimensionKey) {
+            $url = $this->extractImageUrlByDimension($attributes, $dimensionKey);
+            if ($url !== null) {
+                return $this->absolutizeUrl($url);
+            }
+        }
+
+        if ($imageType !== null) {
+            foreach ([$imageType, strtolower($imageType)] as $dimensionKey) {
+                $url = $this->extractImageUrlByDimension($attributes, $dimensionKey);
+                if ($url !== null) {
+                    return $this->absolutizeUrl($url);
+                }
+            }
+        }
+
         foreach (['url', 'externalUrl', 'downloadUrl'] as $field) {
             $url = $attributes[$field] ?? null;
             if (is_string($url) && trim($url) !== '') {
                 return $this->absolutizeUrl($url);
+            }
+        }
+
+        foreach (['filePath', 'path', 'paths', 'urls'] as $field) {
+            $value = $attributes[$field] ?? null;
+            if (!is_array($value)) {
+                continue;
+            }
+
+            if (array_is_list($value)) {
+                foreach ($value as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+                    $url = $item['url'] ?? null;
+                    if (is_string($url) && trim($url) !== '') {
+                        return $this->absolutizeUrl($url);
+                    }
+                }
+                continue;
+            }
+
+            foreach ($value as $candidate) {
+                if (is_string($candidate) && trim($candidate) !== '') {
+                    return $this->absolutizeUrl($candidate);
+                }
+                if (is_array($candidate)) {
+                    $url = $candidate['url'] ?? null;
+                    if (is_string($url) && trim($url) !== '') {
+                        return $this->absolutizeUrl($url);
+                    }
+                }
             }
         }
 
@@ -752,6 +833,88 @@ final class OroProductService
                 $fileResource = $includedIndex[$this->includedKey($type, $id)] ?? null;
                 if (is_array($fileResource)) {
                     return $this->extractFileUrl($fileResource);
+                }
+
+                $fileFromSubresource = $this->fetchFileResourceFromSubresource($type, $id);
+                if (is_array($fileFromSubresource)) {
+                    return $this->extractFileUrl($fileFromSubresource);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $attributes
+     */
+    private function extractImageUrlByDimension(array $attributes, string $dimensionKey): ?string
+    {
+        foreach (['filePath', 'urls', 'path', 'paths'] as $field) {
+            $value = $attributes[$field] ?? null;
+            if (!is_array($value)) {
+                continue;
+            }
+
+            if (array_is_list($value)) {
+                foreach ($value as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+                    $dimension = strtolower((string) ($item['dimension'] ?? ''));
+                    if ($dimension !== strtolower($dimensionKey)) {
+                        continue;
+                    }
+
+                    $url = $item['url'] ?? null;
+                    if (is_string($url) && trim($url) !== '') {
+                        return $url;
+                    }
+                }
+                continue;
+            }
+
+            $url = $value[$dimensionKey] ?? $value[strtolower($dimensionKey)] ?? null;
+            if (is_string($url) && trim($url) !== '') {
+                return $url;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $productImageResource
+     * @param array<string, array<string, mixed>> $includedIndex
+     */
+    private function extractProductImageType(array $productImageResource, array $includedIndex): ?string
+    {
+        $types = $productImageResource['relationships']['types']['data'] ?? null;
+        if (!is_array($types)) {
+            return null;
+        }
+
+        $identifiers = array_is_list($types) ? $types : [$types];
+        foreach ($identifiers as $identifier) {
+            if (!is_array($identifier)) {
+                continue;
+            }
+            $type = (string) ($identifier['type'] ?? '');
+            $id = (string) ($identifier['id'] ?? '');
+            if ($type === '' || $id === '') {
+                continue;
+            }
+
+            $included = $includedIndex[$this->includedKey($type, $id)] ?? null;
+            if (!is_array($included)) {
+                continue;
+            }
+
+            $attributes = is_array($included['attributes'] ?? null) ? $included['attributes'] : [];
+            foreach (['productImageTypeType', 'type', 'name'] as $field) {
+                $value = $attributes[$field] ?? null;
+                if (is_string($value) && trim($value) !== '') {
+                    return trim($value);
                 }
             }
         }
@@ -765,6 +928,13 @@ final class OroProductService
     private function extractFileUrl(array $fileResource): ?string
     {
         $attributes = is_array($fileResource['attributes'] ?? null) ? $fileResource['attributes'] : [];
+        foreach (['product_listing', 'listing', 'product_gallery_main', 'main', 'original'] as $dimensionKey) {
+            $dimensionUrl = $this->extractImageUrlByDimension($attributes, $dimensionKey);
+            if ($dimensionUrl !== null) {
+                return $this->absolutizeUrl($dimensionUrl);
+            }
+        }
+
         foreach (['url', 'externalUrl', 'downloadUrl'] as $field) {
             $url = $attributes[$field] ?? null;
             if (is_string($url) && trim($url) !== '') {
@@ -786,6 +956,28 @@ final class OroProductService
         }
 
         return null;
+    }
+
+    /**
+     * Some Oro payloads do not include the related file resource for product images,
+     * so we fetch it via subresource as a fallback.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function fetchFileResourceFromSubresource(string $type, string $id): ?array
+    {
+        if (strtolower($type) !== 'files' || trim($id) === '') {
+            return null;
+        }
+
+        try {
+            $response = $this->apiClient->get('/files/' . $id, [], true, (int) env('CACHE_TTL_PRODUCTS', '300'));
+        } catch (ApiException) {
+            return null;
+        }
+
+        $data = $response['data'] ?? null;
+        return is_array($data) ? $data : null;
     }
 
     private function absolutizeUrl(string $url): string

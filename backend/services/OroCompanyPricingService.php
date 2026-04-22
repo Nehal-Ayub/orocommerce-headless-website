@@ -131,27 +131,36 @@ final class OroCompanyPricingService
     private function loadProductPricesForCompany(int $companyId, array $productIds): array
     {
         $priceLists = $this->getCompanyPriceLists($companyId);
-        if ($priceLists === []) {
-            return [];
+        $prices = [];
+
+        if ($priceLists !== []) {
+            foreach ($priceLists as $priceList) {
+                $priceListId = (int) ($priceList['id'] ?? 0);
+                if ($priceListId <= 0) {
+                    continue;
+                }
+
+                $priceMap = $this->fetchPricesForPriceList($priceList, $productIds);
+                foreach ($priceMap as $productId => $price) {
+                    if (isset($prices[$productId])) {
+                        continue;
+                    }
+                    $prices[$productId] = $price;
+                }
+
+                if (count($prices) >= count($productIds)) {
+                    break;
+                }
+            }
         }
 
-        $prices = [];
-        foreach ($priceLists as $priceList) {
-            $priceListId = (int) ($priceList['id'] ?? 0);
-            if ($priceListId <= 0) {
-                continue;
-            }
-
-            $priceMap = $this->fetchPricesForPriceList($priceList, $productIds);
-            foreach ($priceMap as $productId => $price) {
+        if (count($prices) < count($productIds)) {
+            $scopedPrices = $this->fetchScopedCustomerPrices($companyId, $productIds);
+            foreach ($scopedPrices as $productId => $price) {
                 if (isset($prices[$productId])) {
                     continue;
                 }
                 $prices[$productId] = $price;
-            }
-
-            if (count($prices) >= count($productIds)) {
-                break;
             }
         }
 
@@ -291,6 +300,93 @@ final class OroCompanyPricingService
     }
 
     /**
+     * @param array<int, int> $productIds
+     * @return array<int, array{amount: float, currency: string, priceListId: int|null, priceListName: string}>
+     */
+    private function fetchScopedCustomerPrices(int $companyId, array $productIds): array
+    {
+        if ($productIds === []) {
+            return [];
+        }
+
+        $productIdList = implode(',', array_map('strval', $productIds));
+        $pageSize = (string) max(100, count($productIds));
+        $customerScopes = $companyId > 0 ? [$companyId, 0] : [0];
+        $result = [];
+
+        foreach ($customerScopes as $customerId) {
+            $attempts = [
+                [
+                    'path' => '/customerprices',
+                    'query' => [
+                        'filter[customer]' => (string) $customerId,
+                        'filter[product]' => $productIdList,
+                        'include' => 'product',
+                        'page[size]' => $pageSize,
+                    ],
+                    'label' => $customerId > 0 ? 'Customer Scoped Price' : 'Guest Price',
+                ],
+                [
+                    'path' => '/customerprices',
+                    'query' => [
+                        'filter[customer.id]' => (string) $customerId,
+                        'filter[product.id]' => $productIdList,
+                        'include' => 'product',
+                        'page[size]' => $pageSize,
+                    ],
+                    'label' => $customerId > 0 ? 'Customer Scoped Price' : 'Guest Price',
+                ],
+                [
+                    'path' => '/productprices',
+                    'query' => [
+                        'filter[customer]' => (string) $customerId,
+                        'filter[product]' => $productIdList,
+                        'include' => 'product',
+                        'page[size]' => $pageSize,
+                    ],
+                    'label' => $customerId > 0 ? 'Customer Scoped Price' : 'Guest Price',
+                ],
+                [
+                    'path' => '/productprices',
+                    'query' => [
+                        'filter[customer.id]' => (string) $customerId,
+                        'filter[product.id]' => $productIdList,
+                        'include' => 'product',
+                        'page[size]' => $pageSize,
+                    ],
+                    'label' => $customerId > 0 ? 'Customer Scoped Price' : 'Guest Price',
+                ],
+            ];
+
+            foreach ($attempts as $attempt) {
+                try {
+                    $response = $this->apiClient->get($attempt['path'], $attempt['query'], true);
+                } catch (\App\Models\ApiException) {
+                    continue;
+                }
+
+                $parsed = $this->parsePricesFromResponse($response, 0, $attempt['label'], 'USD');
+                if ($parsed === []) {
+                    continue;
+                }
+
+                foreach ($parsed as $productId => $price) {
+                    if (isset($result[$productId])) {
+                        continue;
+                    }
+                    $result[$productId] = $price;
+                }
+
+                if (count($result) >= count($productIds)) {
+                    return $result;
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
      * @param array<string, mixed> $attributes
      * @param array<string, array<string, mixed>> $includedIndex
      */
@@ -353,6 +449,38 @@ final class OroCompanyPricingService
                 return [
                     'amount' => (float) $value,
                     'currency' => (string) ($nestedPrice['currency'] ?? $attributes['currency'] ?? $defaultCurrency),
+                ];
+            }
+        }
+
+        foreach (['minimalPrice', 'minimal_price', 'unitPrice', 'unit_price'] as $field) {
+            $value = $attributes[$field] ?? null;
+            if (is_numeric($value)) {
+                return [
+                    'amount' => (float) $value,
+                    'currency' => (string) ($attributes['currency'] ?? $defaultCurrency),
+                ];
+            }
+        }
+
+        $priceLists = [
+            $attributes['priceList'] ?? null,
+            $attributes['price_list'] ?? null,
+            $attributes['customerPrice'] ?? null,
+            $attributes['customer_price'] ?? null,
+        ];
+        foreach ($priceLists as $pricePayload) {
+            if (!is_array($pricePayload)) {
+                continue;
+            }
+            foreach (['value', 'amount', 'price'] as $field) {
+                $value = $pricePayload[$field] ?? null;
+                if (!is_numeric($value)) {
+                    continue;
+                }
+                return [
+                    'amount' => (float) $value,
+                    'currency' => (string) ($pricePayload['currency'] ?? $attributes['currency'] ?? $defaultCurrency),
                 ];
             }
         }
