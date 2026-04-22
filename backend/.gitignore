@@ -1,0 +1,3 @@
+/storage/cache/*.json
+/storage/logs/*.log
+/.env
